@@ -69,7 +69,6 @@ def main():
                         packets.append(chunk)
 
                 acked = base
-                last_ack_time = time.time()
                 sock.settimeout(TIMEOUT)  # ✅ 타임아웃 설정
 
                 while acked < len(packets):
@@ -87,7 +86,9 @@ def main():
                             acked += 1
                         if (acked % SEQ_MODULO) == ack:
                             acked += 1
-                        last_ack_time = time.time()
+                        if acked >= len(packets):
+                            break  # 모든 패킷 ACK 받았으면 전송 루프 종료
+
                     except socket.timeout:
                         print("Timeout. Resending from base.")
                         next_seq = acked
