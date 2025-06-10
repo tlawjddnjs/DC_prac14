@@ -36,7 +36,6 @@ def main():
         print(f'Parsed arguments {FLAGS}')
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((FLAGS.address, FLAGS.port))
-    sock.settimeout(None)
     print(f'Listening on {sock}')
 
     while True:
@@ -59,7 +58,6 @@ def main():
                     continue
 
                 with open(filename, 'rb') as f:
-                    sock.settimeout(0.5)  # Go-Back-N용 타임아웃 설정
                     base = 0
                     next_seq = 0
                     packets = []
@@ -72,9 +70,9 @@ def main():
 
                 acked = base
                 last_ack_time = time.time()
+                sock.settimeout(TIMEOUT)  # ✅ 타임아웃 설정
 
                 while acked < len(packets):
-                    # Window 내에서 전송
                     while next_seq < acked + WINDOW_SIZE and next_seq < len(packets):
                         pkt = make_packet(next_seq % SEQ_MODULO, packets[next_seq])
                         sock.sendto(pkt, client)
@@ -85,18 +83,15 @@ def main():
                         ack_raw, _ = sock.recvfrom(2)
                         ack = struct.unpack('>H', ack_raw)[0]
                         print(f"Received ACK={ack}")
-                        # ACK가 base와 일치할 때만 슬라이드
                         while acked < len(packets) and (acked % SEQ_MODULO) != ack:
                             acked += 1
                         if (acked % SEQ_MODULO) == ack:
                             acked += 1
                         last_ack_time = time.time()
                     except socket.timeout:
-                        if time.time() - last_ack_time > TIMEOUT:
-                            print("Timeout. Resending from base.")
-                            next_seq = acked  # 재전송
+                        print("Timeout. Resending from base.")
+                        next_seq = acked
 
-                sock.settimeout(None)
                 print(f'File transfer complete: {filename}')
 
         except KeyboardInterrupt:
