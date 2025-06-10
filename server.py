@@ -36,7 +36,7 @@ def main():
         print(f'Parsed arguments {FLAGS}')
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.bind((FLAGS.address, FLAGS.port))
-    sock.settimeout(0.1)
+    sock.settimeout(None)
     print(f'Listening on {sock}')
 
     while True:
@@ -59,6 +59,7 @@ def main():
                     continue
 
                 with open(filename, 'rb') as f:
+                    sock.settimeout(0.5)  # Go-Back-N용 타임아웃 설정
                     base = 0
                     next_seq = 0
                     packets = []
@@ -95,6 +96,7 @@ def main():
                             print("Timeout. Resending from base.")
                             next_seq = acked  # 재전송
 
+                sock.settimeout(None)
                 print(f'File transfer complete: {filename}')
 
         except KeyboardInterrupt:
