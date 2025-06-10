@@ -1,16 +1,22 @@
 import socket
-import struct
 import os
-import threading
+import struct
 import time
 
-SERVER_IP = '0.0.0.0'
-SERVER_PORT = 3034
-MTU = 1500
-SEQ_MAX = 16  # 0~15
-WINDOW_SIZE = 4
-DATA_SIZE = MTU - 4
+FLAGS = _ = None
+DEBUG = False
+
+CHUNK_SIZE = 1500
+PAYLOAD_SIZE = 1456
+WINDOW_SIZE = 4  # 2^m - 1 형태로 설정
 TIMEOUT = 0.5
+SEQ_MODULO = 16
+file_info = {}
+
+def load_file_info():
+    for fname in os.listdir('.'):
+        if os.path.isfile(fname):
+            file_info[fname.upper()] = os.path.getsize(fname)
 
 def calculate_checksum(buf: bytes) -> int:
     if len(buf) & 1:
@@ -19,96 +25,92 @@ def calculate_checksum(buf: bytes) -> int:
     s = ~s & 0xFFFF
     return s
 
-class GBNServer:
-    def __init__(self):
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.bind((SERVER_IP, SERVER_PORT))
-        self.sock.settimeout(0.1)
-        print(f"[+] Listening on {SERVER_IP}:{SERVER_PORT}")
-        self.clients = {}  # addr -> 상태 정보 저장 가능
+def make_packet(seq: int, data: bytes) -> bytes:
+    seq_bytes = struct.pack('>H', seq)
+    checksum = calculate_checksum(seq_bytes + b'\x00\x00' + data)
+    checksum_bytes = struct.pack('>H', checksum)
+    return seq_bytes + checksum_bytes + data
 
-    def listen(self):
-        while True:
-            try:
-                data, addr = self.sock.recvfrom(MTU)
-                if data.startswith(b'INFO'):
-                    _, filename = data.decode().split(' ', 1)
-                    self.handle_info(addr, filename.strip())
-                elif data.startswith(b'DOWNLOAD'):
-                    _, filename = data.decode().split(' ', 1)
-                    threading.Thread(target=self.handle_download, args=(addr, filename.strip())).start()
+def main():
+    if DEBUG:
+        print(f'Parsed arguments {FLAGS}')
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind((FLAGS.address, FLAGS.port))
+    sock.settimeout(0.1)
+    print(f'Listening on {sock}')
+
+    while True:
+        try:
+            data, client = sock.recvfrom(2**16)
+            message = data.decode('utf-8').strip()
+            print(f'Received {message} from {client}')
+
+            if message.startswith("INFO "):
+                filename = message[5:].strip().upper()
+                if filename in file_info:
+                    size = str(file_info[filename])
+                    sock.sendto(size.encode('utf-8'), client)
                 else:
-                    # Ack 응답 처리: 다운 중에만 의미 있음
-                    self.last_ack[addr] = struct.unpack('>H', data[:2])[0]
-            except socket.timeout:
-                continue
+                    sock.sendto("404 Not Found".encode('utf-8'), client)
 
-    def handle_info(self, addr, filename):
-        if not os.path.exists(filename):
-            self.sock.sendto(b'404 Not Found', addr)
-            return
-        size = os.path.getsize(filename)
-        self.sock.sendto(str(size).encode('utf-8'), addr)
-        print(f"[INFO] Sent file size ({size}) to {addr}")
+            elif message.startswith("DOWNLOAD"):
+                filename = message[8:].strip().upper()
+                if filename not in file_info:
+                    continue
 
-    def handle_download(self, addr, filename):
-        with open(filename, 'rb') as f:
-            file_data = f.read()
+                with open(filename, 'rb') as f:
+                    base = 0
+                    next_seq = 0
+                    packets = []
+                    total = file_info[filename]
+                    while True:
+                        chunk = f.read(PAYLOAD_SIZE)
+                        if not chunk:
+                            break
+                        packets.append(chunk)
 
-        total_packets = (len(file_data) + DATA_SIZE - 1) // DATA_SIZE
-        base = 0
-        next_seq = 0
-        timers = [None] * total_packets
-        acked = [False] * total_packets
-        self.last_ack = {addr: -1}  # 마지막 받은 ACK 번호
+                acked = base
+                last_ack_time = time.time()
 
-        def send_packet(i):
-            seq = i % SEQ_MAX
-            start = i * DATA_SIZE
-            end = min(start + DATA_SIZE, len(file_data))
-            data = file_data[start:end]
-            packet = struct.pack('>H', seq) + struct.pack('>H', calculate_checksum(struct.pack('>H', seq) + data)) + data
-            self.sock.sendto(packet, addr)
-            print(f"[SEND] Seq={seq} (index={i})")
+                while acked < len(packets):
+                    # Window 내에서 전송
+                    while next_seq < acked + WINDOW_SIZE and next_seq < len(packets):
+                        pkt = make_packet(next_seq % SEQ_MODULO, packets[next_seq])
+                        sock.sendto(pkt, client)
+                        print(f'Sent seq={next_seq % SEQ_MODULO}')
+                        next_seq += 1
 
-        def retransmit_window():
-            print(f"[RETX] Timer expired. Resending window base={base}, next_seq={next_seq}")
-            for i in range(base, next_seq):
-                send_packet(i)
+                    try:
+                        ack_raw, _ = sock.recvfrom(2)
+                        ack = struct.unpack('>H', ack_raw)[0]
+                        print(f"Received ACK={ack}")
+                        # ACK가 base와 일치할 때만 슬라이드
+                        while acked < len(packets) and (acked % SEQ_MODULO) != ack:
+                            acked += 1
+                        if (acked % SEQ_MODULO) == ack:
+                            acked += 1
+                        last_ack_time = time.time()
+                    except socket.timeout:
+                        if time.time() - last_ack_time > TIMEOUT:
+                            print("Timeout. Resending from base.")
+                            next_seq = acked  # 재전송
 
-        # 전송 루프
-        while base < total_packets:
-            # 새 패킷 전송
-            while next_seq < base + WINDOW_SIZE and next_seq < total_packets:
-                send_packet(next_seq)
-                timers[next_seq] = time.time()
-                next_seq += 1
+                print(f'File transfer complete: {filename}')
 
-            # ACK 대기
-            try:
-                ack_data, _ = self.sock.recvfrom(MTU)
-                ack_seq = struct.unpack('>H', ack_data[:2])[0]
-                print(f"[ACK] Received: {ack_seq}")
-
-                # base와 ack_seq 일치하면 슬라이드
-                while base < total_packets and (base % SEQ_MAX) != ack_seq:
-                    acked[base] = True
-                    base += 1
-
-                # 최종적으로 ack_seq까지 포함
-                if base < total_packets and (base % SEQ_MAX) == ack_seq:
-                    acked[base] = True
-                    base += 1
-
-            except socket.timeout:
-                # 타임아웃 확인
-                for i in range(base, next_seq):
-                    if not acked[i] and time.time() - timers[i] > TIMEOUT:
-                        retransmit_window()
-                        break  # 한번만 재전송
-
-        print("[+] File transfer complete")
+        except KeyboardInterrupt:
+            print('Shutting down...')
+            break
+        except Exception as e:
+            print(f'Error: {e}')
+            continue
 
 if __name__ == '__main__':
-    server = GBNServer()
-    server.listen()
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('--address', type=str, default='0.0.0.0')
+    parser.add_argument('--port', type=int, default=3034)
+    FLAGS, _ = parser.parse_known_args()
+    DEBUG = FLAGS.debug
+    load_file_info()
+    main()
