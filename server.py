@@ -16,7 +16,7 @@ file_info = {}
 def load_file_info():
     for fname in os.listdir('.'):
         if os.path.isfile(fname):
-            file_info[fname.upper()] = os.path.getsize(fname)
+            file_info[fname] = os.path.getsize(fname)
 
 def calculate_checksum(buf: bytes) -> int:
     if len(buf) & 1:
@@ -45,7 +45,7 @@ def main():
             print(f'Received {message} from {client}')
 
             if message.startswith("INFO "):
-                filename = message[5:].strip().upper()
+                filename = message[5:].strip()
                 if filename in file_info:
                     size = str(file_info[filename])
                     sock.sendto(size.encode('utf-8'), client)
@@ -53,7 +53,7 @@ def main():
                     sock.sendto("404 Not Found".encode('utf-8'), client)
 
             elif message.startswith("DOWNLOAD"):
-                filename = message[8:].strip().upper()
+                filename = message[8:].strip()
                 if filename not in file_info:
                     continue
 
